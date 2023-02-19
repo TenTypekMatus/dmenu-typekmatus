@@ -1,3 +1,4 @@
 *.o
 dmenu_*
 *.diff
+config.h
