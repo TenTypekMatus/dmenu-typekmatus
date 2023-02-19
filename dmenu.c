@@ -84,7 +84,7 @@ calcoffsets(void)
 	int i, n;
 
 	if (lines > 0)
-		n = lines * columns * bh;
+		n = lines * bh;
 	else
 		n = mw - (promptw + inputw + TEXTW("<") + TEXTW(">"));
 	/* calculate which items will begin the next page and previous page */
@@ -169,15 +169,9 @@ drawmenu(void)
 	}
 
 	if (lines > 0) {
-		/* draw grid */
-		int i = 0;
-		for (item = curr; item != next; item = item->right, i++)
-			drawitem(
-				item,
-				x + ((i / lines) *  ((mw - x) / columns)),
-				y + (((i % lines) + 1) * bh),
-				(mw - x) / columns
-			);
+		/* draw vertical list */
+		for (item = curr; item != next; item = item->right)
+			drawitem(item, x, y += bh, mw - x);
 	} else if (matches) {
 		/* draw horizontal list */
 		x += inputw;
@@ -535,6 +529,142 @@ draw:
 }
 
 static void
+buttonpress(XEvent *e)
+{
+	struct item *item;
+	XButtonPressedEvent *ev = &e->xbutton;
+	int x = 0, y = 0, h = bh, w;
+
+	if (ev->window != win)
+		return;
+
+	/* right-click: exit */
+	if (ev->button == Button3)
+		exit(1);
+
+	if (prompt && *prompt)
+		x += promptw;
+
+	/* input field */
+	w = (lines > 0 || !matches) ? mw - x : inputw;
+
+	/* left-click on input: clear input,
+	 * NOTE: if there is no left-arrow the space for < is reserved so
+	 *       add that to the input width */
+	if (ev->button == Button1 &&
+	   ((lines <= 0 && ev->x >= 0 && ev->x <= x + w +
+	   ((!prev || !curr->left) ? TEXTW("<") : 0)) ||
+	   (lines > 0 && ev->y >= y && ev->y <= y + h))) {
+		insert(NULL, -cursor);
+		drawmenu();
+		return;
+	}
+	/* middle-mouse click: paste selection */
+	if (ev->button == Button2) {
+		XConvertSelection(dpy, (ev->state & ShiftMask) ? clip : XA_PRIMARY,
+		                  utf8, utf8, win, CurrentTime);
+		drawmenu();
+		return;
+	}
+	/* scroll up */
+	if (ev->button == Button4 && prev) {
+		sel = curr = prev;
+		calcoffsets();
+		drawmenu();
+		return;
+	}
+	/* scroll down */
+	if (ev->button == Button5 && next) {
+		sel = curr = next;
+		calcoffsets();
+		drawmenu();
+		return;
+	}
+	if (ev->button != Button1)
+		return;
+	if (ev->state & ~ControlMask)
+		return;
+	if (lines > 0) {
+		/* vertical list: (ctrl)left-click on item */
+		w = mw - x;
+		for (item = curr; item != next; item = item->right) {
+			y += h;
+			if (ev->y >= y && ev->y <= (y + h)) {
+				puts(item->text);
+				if (!(ev->state & ControlMask))
+					exit(0);
+				sel = item;
+				if (sel) {
+					sel->out = 1;
+					drawmenu();
+				}
+				return;
+			}
+		}
+	} else if (matches) {
+		/* left-click on left arrow */
+		x += inputw;
+		w = TEXTW("<");
+		if (prev && curr->left) {
+			if (ev->x >= x && ev->x <= x + w) {
+				sel = curr = prev;
+				calcoffsets();
+				drawmenu();
+				return;
+			}
+		}
+		/* horizontal list: (ctrl)left-click on item */
+		for (item = curr; item != next; item = item->right) {
+			x += w;
+			w = MIN(TEXTW(item->text), mw - x - TEXTW(">"));
+			if (ev->x >= x && ev->x <= x + w) {
+				puts(item->text);
+				if (!(ev->state & ControlMask))
+					exit(0);
+				sel = item;
+				if (sel) {
+					sel->out = 1;
+					drawmenu();
+				}
+				return;
+			}
+		}
+		/* left-click on right arrow */
+		w = TEXTW(">");
+		x = mw - w;
+		if (next && ev->x >= x && ev->x <= x + w) {
+			sel = curr = next;
+			calcoffsets();
+			drawmenu();
+			return;
+		}
+	}
+}
+
+static void
+motionevent(XButtonEvent *ev)
+{
+	struct item *it;
+	int xy, ev_xy;
+
+	if (ev->window != win || matches == 0)
+		return;
+
+	xy = lines > 0 ? bh : inputw + promptw + TEXTW("<");
+	ev_xy = lines > 0 ? ev->y : ev->x;
+	for (it = curr; it && it != next; it = it->right) {
+		int wh = lines > 0 ? bh : textw_clamp(it->text, mw - xy - TEXTW(">"));
+		if (ev_xy >= xy && ev_xy < (xy + wh)) {
+			sel = it;
+			calcoffsets();
+			drawmenu();
+			break;
+		}
+		xy += wh;
+	}
+}
+
+static void
 paste(void)
 {
 	char *p, *q;
@@ -592,6 +722,12 @@ run(void)
 				break;
 			cleanup();
 			exit(1);
+		case ButtonPress:
+			buttonpress(&ev);
+			break;
+		case MotionNotify:
+			motionevent(&ev.xbutton);
+			break;
 		case Expose:
 			if (ev.xexpose.count == 0)
 				drw_map(drw, win, 0, 0, mw, mh);
@@ -689,7 +825,8 @@ setup(void)
 	/* create menu window */
 	swa.override_redirect = True;
 	swa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
-	swa.event_mask = ExposureMask | KeyPressMask | VisibilityChangeMask;
+	swa.event_mask = ExposureMask | KeyPressMask | VisibilityChangeMask |
+	                 ButtonPressMask | PointerMotionMask;
 	win = XCreateWindow(dpy, parentwin, x, y, mw, mh, 0,
 	                    CopyFromParent, CopyFromParent, CopyFromParent,
 	                    CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
@@ -745,13 +882,9 @@ main(int argc, char *argv[])
 		} else if (i + 1 == argc)
 			usage();
 		/* these options take one argument */
-		else if (!strcmp(argv[i], "-g")) {   /* number of columns in grid */
-			columns = atoi(argv[++i]);
-			if (lines == 0) lines = 1;
-		} else if (!strcmp(argv[i], "-l")) { /* number of lines in grid */
+		else if (!strcmp(argv[i], "-l"))   /* number of lines in vertical list */
 			lines = atoi(argv[++i]);
-			if (columns == 0) columns = 1;
-		} else if (!strcmp(argv[i], "-m"))
+		else if (!strcmp(argv[i], "-m"))
 			mon = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "-p"))   /* adds prompt to left of input field */
 			prompt = argv[++i];

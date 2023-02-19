@@ -2,3 +2,5 @@
 dmenu_*
 *.diff
 config.h
+./dmenu
+./stest
